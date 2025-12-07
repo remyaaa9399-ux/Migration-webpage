@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Wildlife Migration — Depth & Symbol Simulation</title>
+<style>
+  :root{
+    --bg:#071126; --panel:#0b1a28; --accent:#ffd166; --muted:#9fb4c6;
+  }
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;}
+  body{background:linear-gradient(180deg,var(--bg),#02101a);color:#eaf6ff;display:flex;gap:18px;padding:18px;box-sizing:border-box}
+  .app{display:grid;grid-template-columns:1fr 320px;gap:18px;flex:1;min-height:calc(100vh - 36px)}
+  .canvas-card{background:rgba(255,255,255,0.02);border-radius:12px;padding:12px;box-shadow:0 10px 40px rgba(0,0,0,0.7);display:flex;flex-direction:column}
+  canvas{width:100%;height:calc(100vh - 120px);border-radius:10px;display:block;background:
+    linear-gradient(180deg, rgba(5,12,20,0.8), rgba(2,6,12,0.95));}
+  .panel{background:rgba(255,255,255,0.02);padding:14px;border-radius:12px;min-width:280px}
+  h1{margin:0;font-size:16px}
+  .controls{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+  input[type=range]{width:100%}
+  button{background:var(--accent);border:none;padding:8px 10px;border-radius:8px;cursor:pointer;color:#032025}
+  .ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+  .row{display:flex;gap:8px}
+  .muted{font-size:12px;color:var(--muted)}
+  .legend{display:flex;gap:10px;align-items:center;margin-top:8px}
+  .sym{width:18px;height:18px;border-radius:4px;display:inline-block}
+  @media (max-width:900px){ .app{grid-template-columns:1fr} canvas{height:60vh} .panel{position:sticky;top:12px} }
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="canvas-card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h1>Wildlife Migration — Depth & Symbol</h1>
+        <div class="muted">Depth via size & parallax</div>
+      </div>
+      <canvas id="stage"></canvas>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+        <div class="muted">Click to place a temporary attractor (hold for 2s)</div>
+        <div class="muted">Tip: change species and depth to explore</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <strong>Controls</strong>
+          <div class="muted">Symbols & depth layers</div>
+        </div>
+        <div><button id="pauseBtn" class="ghost">Pause</button></div>
+      </div>
+
+      <div class="controls">
+        <div>
+          <label>Species</label>
+          <select id="speciesSelect">
+            <option value="bird">Bird (flying)</option>
+            <option value="deer">Ungulate (ground)</option>
+            <option value="whale">Whale (sea)</option>
+          </select>
+        </div>
+
+        <div>
+          <label>Count: <strong id="countLabel">60</strong></label>
+          <input id="count" type="range" min="5" max="300" step="1" value="60">
+        </div>
+
+        <div>
+          <label>Global speed: <strong id="speedLabel">1.0</strong></label>
+          <input id="speed" type="range" min="0.2" max="3.0" step="0.05" value="1.0">
+        </div>
+
+        <div>
+          <label>Depth distribution (foreground ↔ background): <strong id="depthBiasLabel">0.5</strong></label>
+          <input id="depthBias" type="range" min="0" max="1" step="0.01" value="0.5">
+        </div>
+
+        <div style="display:flex;gap:8px">
+          <button id="resetBtn">Reset</button>
+          <button id="toggleTrails" class="ghost">Toggle Trails</button>
+        </div>
+
+        <div class="legend">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <div><span class="sym" style="background:#ffd166"></span> Bird</div>
+            <div><span class="sym" style="background:#8ecae6"></span> Deer</div>
+            <div><span class="sym" style="background:#a0c4ff"></span> Whale</div>
+          </div>
+          <div style="margin-left:auto;text-align:right" class="muted">
+            Depth layers: BG / MG / FG<br>size • blur • speed
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  function fit() {
+    // size canvas to element display size (handles hi-dpi)
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  // Controls
+  const speciesSelect = document.getElementById('speciesSelect');
+  const countSlider = document.getElementById('count');
+  const speedSlider = document.getElementById('speed');
+  const depthBias = document.getElementById('depthBias');
+  const countLabel = document.getElementById('countLabel');
+  const speedLabel = document.getElementById('speedLabel');
+  const depthBiasLabel = document.getElementById('depthBiasLabel');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const toggleTrailsBtn = document.getElementById('toggleTrails');
+
+  // state
+  let entities = [];
+  let running = true;
+  let trails = true;
+  let globalSpeed = Number(speedSlider.value);
+  let depthBiasVal = Number(depthBias.value);
+
+  countLabel.textContent = countSlider.value;
+  speedLabel.textContent = globalSpeed.toFixed(2);
+  depthBiasLabel.textContent = depthBiasVal.toFixed(2);
+
+  // Simple migration path generator: curved path from left to right with slight latitudinal variation
+  function makePath(type) {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    // anchor points vary by "species" to create different latitudes
+    const latFactor = type === 'bird' ? 0.35 : type === 'deer' ? 0.6 : 0.75;
+    const midY = h * latFactor;
+    // create a wide bezier path by sampling many points defined by a quadratic/cubic curve
+    const cpOffset = h * 0.18;
+    const p0 = {x: -0.1*w, y: midY + (Math.random()-0.5)*h*0.08};
+    const p1 = {x: w*0.25, y: midY - cpOffset + (Math.random()-0.5)*h*0.06};
+    const p2 = {x: w*0.6, y: midY + cpOffset*0.5 + (Math.random()-0.5)*h*0.06};
+    const p3 = {x: w*1.12, y: midY + (Math.random()-0.5)*h*0.1};
+    // return function that maps t [0..1] to x,y using cubic bezier
+    return function(t) {
+      const u = 1 - t;
+      // cubic bezier
+      const x = u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x;
+      const y = u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y;
+      return {x,y};
+    };
+  }
+
+  // Symbol drawing - draws at (x,y) with rotation and scaled by 's' (size)
+  function drawSymbol(ctx, kind, x, y, angle, s, alpha) {
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(angle);
+    ctx.globalAlpha = alpha;
+
+    if (kind === 'bird') {
+      // stylized bird: two wings (V)
+      ctx.beginPath();
+      ctx.moveTo(-8*s, -3*s);
+      ctx.quadraticCurveTo(-3*s, 0, 0, 0);
+      ctx.quadraticCurveTo(-3*s, 0, -8*s, 3*s);
+      ctx.strokeStyle = `rgba(255,209,102,${0.95})`;
+      ctx.lineWidth = 2*s;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // small body
+      ctx.beginPath();
+      ctx.arc(0,0,1.4*s,0,Math.PI*2);
+      ctx.fillStyle = `rgba(255,215,120,${0.95})`;
+      ctx.fill();
+    } else if (kind === 'deer') {
+      // simple deer silhouette (profile)
+      ctx.beginPath();
+      ctx.moveTo(-6*s, 2*s);
+      ctx.lineTo(-3*s, -2*s);
+      ctx.lineTo(0*s, -2*s);
+      ctx.lineTo(2*s, 0*s);
+      ctx.lineTo(4*s, 2*s);
+      ctx.lineTo(0*s, 3*s);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(142,202,230,${0.95})`;
+      ctx.fill();
+
+      // small antler mark
+      ctx.beginPath();
+      ctx.moveTo(-1*s, -1.6*s);
+      ctx.lineTo(-2*s, -3*s);
+      ctx.moveTo(0*s, -1.2*s);
+      ctx.lineTo(1*s, -2.6*s);
+      ctx.strokeStyle = `rgba(180,220,240,${0.9})`;
+      ctx.lineWidth = 1*s;
+      ctx.stroke();
+    } else if (kind === 'whale') {
+      // whale-like shape
+      ctx.beginPath();
+      ctx.moveTo(-10*s, 0);
+      ctx.quadraticCurveTo(-6*s, -4*s, 0*s, -3*s);
+      ctx.quadraticCurveTo(6*s, -2*s, 10*s, 0*s);
+      ctx.quadraticCurveTo(6*s, 3*s, 0*s, 4*s);
+      ctx.quadraticCurveTo(-6*s, 3*s, -10*s, 0);
+      ctx.fillStyle = `rgba(160,196,255,${0.95})`;
+      ctx.fill();
+
+      // tail
+      ctx.beginPath();
+      ctx.moveTo(10*s,0);
+      ctx.lineTo(14*s,-3*s);
+      ctx.lineTo(14*s,3*s);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1.0;
+  }
+
+  // Entity class: follows a path function, has depth (0..1), t parameter along path
+  class Migrant {
+    constructor(kind, pathFn, depth, t0) {
+      this.kind = kind;
+      this.pathFn = pathFn;
+      this.depth = depth; // 0 (far bg) .. 1 (foreground)
+      this.t = (t0 !== undefined) ? t0 : Math.random();
+      this.speedBase = 0.00075 + Math.random()*0.0012; // base t-per-frame (scaled by depth and globalSpeed)
+      this.turnNoise = (Math.random()-0.5)*0.002;
+      this.phase = Math.random()*Math.PI*2;
+      this.age = 0;
+      // random color modulation per individual
+      this.colorShift = (Math.random()-0.5)*0.08;
+    }
+    step(dt, params) {
+      // dt: milliseconds since last
+      // depth affects speed: foreground moves faster visually
+      const depthSpeedFactor = 0.6 + 1.6 * this.depth; // 0.6..2.2
+      // t increments; include slight oscillation to avoid perfectly uniform motion
+      this.t += this.speedBase * depthSpeedFactor * params.globalSpeed;
+      this.t += Math.sin(this.phase + this.age*0.002) * 0.0001;
+      // wrap-around
+      if (this.t > 1.05) this.t = -0.05 * Math.random();
+
+      this.age += dt;
+    }
+    render(ctx, params) {
+      // sample path
+      const p = this.pathFn(Math.max(0, Math.min(1, this.t)));
+      // small depth parallax offset depending on global camera shift
+      const px = p.x + params.parallaxX * (this.depth - 0.5) * -1.2;
+      const py = p.y + params.parallaxY * (this.depth - 0.5) * -1.2;
+
+      // compute tangent (approx) for rotation
+      const t2 = Math.min(1, this.t + 0.005);
+      const p2 = this.pathFn(t2);
+      const angle = Math.atan2(p2.y - p.y, p2.x - p.x);
+
+      // size scales with depth: nearer = larger
+      const size = 0.6 + 3.4 * this.depth; // range approx 0.6..4.0
+      // opacity for depth (distant are fainter)
+      const alpha = 0.25 + 0.85 * this.depth;
+
+      // draw a soft blur/glow for foreground/even midground (simulate depth-of-field)
+      if (this.depth > 0.55) {
+        ctx.save();
+        ctx.globalAlpha = 0.08 * (this.depth*1.6);
+        ctx.filter = 'blur(4px)';
+        drawSymbol(ctx, this.kind, px, py, angle, size*1.6, 1.0);
+        ctx.filter = 'none';
+        ctx.restore();
+      }
+
+      // main symbol
+      drawSymbol(ctx, this.kind, px, py, angle, size, alpha);
+
+      // tiny shadow/contact for foreground on ground/sea
+      if (this.kind === 'deer' && this.depth > 0.6) {
+        ctx.save();
+        ctx.globalAlpha = 0.14 * (this.depth);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.beginPath();
+        ctx.ellipse(px, py + 6 * this.depth, 8 * this.depth, 3 * this.depth, 0, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // Simulation parameters & parallax camera motion
+  const params = {
+    globalSpeed: globalSpeed,
+    parallaxX: 0,
+    parallaxY: 0
+  };
+
+  // generate entities for selected species
+  function populate(kind, n) {
+    entities = [];
+    const pathFn = makePath(kind);
+    // depth bias: 0 -> more background, 1 -> more foreground
+    const bias = depthBiasVal;
+    for (let i=0;i<n;i++) {
+      // sample depth using bias (beta-like): favor nearer when bias > 0.5
+      // simple biased random: depth = Math.pow(rand, 1/(1-bias)) when bias<0.5 etc.
+      let r = Math.random();
+      let depth;
+      if (bias >= 0.5) {
+        depth = 1 - Math.pow(1-r, 1 + (bias-0.5)*5); // push toward 1
+      } else {
+        depth = Math.pow(r, 1 + (0.5-bias)*5); // push toward 0
+      }
+      // clamp
+      depth = Math.max(0.03, Math.min(0.98, depth));
+      const t0 = Math.random();
+      entities.push(new Migrant(kind, pathFn, depth, t0));
+    }
+  }
+
+  // initial population
+  populate(speciesSelect.value, Number(countSlider.value));
+
+  // animation timing
+  let last = performance.now();
+
+  function renderLoop(now) {
+    const dt = now - last;
+    last = now;
+
+    // update params
+    params.globalSpeed = globalSpeed;
+
+    // parallax gentle drift (simulate camera movement)
+    params.parallaxX = Math.sin(now*0.00012) * (canvas.clientWidth*0.01);
+    params.parallaxY = Math.cos(now*0.00009) * (canvas.clientHeight*0.006);
+
+    // trails
+    if (!trails) {
+      ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+      // background gradient
+      const g = ctx.createLinearGradient(0,0,0,canvas.clientHeight);
+      g.addColorStop(0,'rgba(6,12,20,1)');
+      g.addColorStop(1,'rgba(1,6,10,1)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight);
+    } else {
+      // soft fade overlay
+      ctx.fillStyle = 'rgba(3,6,10,0.18)';
+      ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight);
+    }
+
+    // optional decorative layers to show depth (mountains / water bands)
+    drawDecorativeLayers(ctx, params);
+
+    // update + render entities
+    for (let e of entities) {
+      e.step(dt, params);
+      e.render(ctx, params);
+    }
+
+    if (running) requestAnimationFrame(renderLoop);
+  }
+
+  // Draw decorative layered shapes to provide visual depth (mountain silhouettes / sea bands)
+  function drawDecorativeLayers(ctx, params) {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    // background mountains (farthest)
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = '#061827';
+    ctx.beginPath();
+    ctx.moveTo(0, h*0.72);
+    ctx.quadraticCurveTo(w*0.15, h*0.6, w*0.28, h*0.74);
+    ctx.quadraticCurveTo(w*0.45, h*0.58, w*0.62, h*0.76);
+    ctx.quadraticCurveTo(w*0.8, h*0.64, w, h*0.7);
+    ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // midground hills
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = '#082633';
+    ctx.beginPath();
+    ctx.moveTo(0, h*0.78);
+    ctx.bezierCurveTo(w*0.15,h*0.68, w*0.35,h*0.84, w*0.53,h*0.74);
+    ctx.bezierCurveTo(w*0.7,h*0.7, w*0.9,h*0.82, w,h*0.78);
+    ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // foreground ground/water band
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#04212a';
+    ctx.fillRect(0, h*0.86, w, h*0.14);
+    ctx.restore();
+  }
+
+  // UI interactions
+  countSlider.addEventListener('input', () => {
+    const n = Number(countSlider.value);
+    countLabel.textContent = n;
+    // adjust entities roughly to match new count
+    const diff = n - entities.length;
+    if (diff > 0) {
+      const pathFn = makePath(speciesSelect.value);
+      for (let i=0;i<diff;i++) {
+        const depth = Math.max(0.03, Math.min(0.98, Math.random()));
+        entities.push(new Migrant(speciesSelect.value, pathFn, depth));
+      }
+    } else if (diff < 0) {
+      entities.splice(0, -diff);
+    }
+  });
+
+  speedSlider.addEventListener('input', () => {
+    globalSpeed = Number(speedSlider.value);
+    speedLabel.textContent = globalSpeed.toFixed(2);
+  });
+
+  depthBias.addEventListener('input', () => {
+    depthBiasVal = Number(depthBias.value);
+    depthBiasLabel.textContent = depthBiasVal.toFixed(2);
+    // repopulate to reflect new distribution
+    populate(speciesSelect.value, Number(countSlider.value));
+  });
+
+  speciesSelect.addEventListener('change', () => {
+    populate(speciesSelect.value, Number(countSlider.value));
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    running = !running;
+    if (running) {
+      pauseBtn.textContent = 'Pause';
+      last = performance.now();
+      requestAnimationFrame(renderLoop);
+    } else {
+      pauseBtn.textContent = 'Resume';
+    }
+  });
+
+  resetBtn.addEventListener('click', () => {
+    populate(speciesSelect.value, Number(countSlider.value));
+    // clear nicely
+    ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+  });
+
+  toggleTrailsBtn.addEventListener('click', () => {
+    trails = !trails;
+    toggleTrailsBtn.textContent = trails ? 'Trails: On' : 'Trails: Off';
+  });
+
+  // Attractor: click canvas to place temporary attractor; entities steer slightly toward it
+  let attractor = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    attractor = {x,y,life: 1800}; // milliseconds
+    // apply immediate local steering
+    setTimeout(()=> attractor = null, attractor.life);
+  });
+
+  // Integrate small steering toward attractor inside render step by temporarily shifting path sampling
+  // We'll override Migrant.render to include attractor influence
+  // Modify Migrant.render to look up attractor and slightly pull position — but to keep code simple we'll update t modestly if near
+  const originalRender = Migrant.prototype.render;
+  Migrant.prototype.render = function(ctx, params) {
+    // if attractor exists and close enough, nudge t so entity moves toward the point faster/slower
+    if (attractor) {
+      const pNow = this.pathFn(Math.max(0, Math.min(1, this.t)));
+      const dx = attractor.x - pNow.x, dy = attractor.y - pNow.y;
+      const dist = Math.hypot(dx,dy);
+      if (dist < 300 + 600*(this.depth)) {
+        // if attractor is ahead on path, we accelerate t to move toward; otherwise decelerate slightly
+        // compute projection of attractor onto path parameter loosely by checking t+delta points
+        // simple heuristic: if angle between tangent and vector to attractor is small, accelerate
+        const pAhead = this.pathFn(Math.min(1, this.t + 0.02));
+        const tx = pAhead.x - pNow.x, ty = pAhead.y - pNow.y;
+        const dot = (tx*dx + ty*dy) / ((Math.hypot(tx,ty) * Math.hypot(dx,dy)) + 1e-6);
+        if (dot > 0.2) this.t += 0.004 * (1 + (0.6 - this.depth)); // push forward more if nearer
+        else this.t += -0.001;
+      }
+    }
+    // call original render
+    originalRender.call(this, ctx, params);
+  };
+
+  // initial clear fill
+  ctx.fillStyle = '#021018';
+  ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight);
+
+  // start loop
+  last = performance.now();
+  requestAnimationFrame(renderLoop);
+
+  // ensure canvas fit on load (in cases style changes)
+  setTimeout(() => { fit(); }, 120);
+})();
+</script>
+</body>
+</html>
